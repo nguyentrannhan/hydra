@@ -387,7 +387,7 @@ func (p *DefaultProvider) publicFallbackURL(ctx context.Context, path string) *u
 func (p *DefaultProvider) fallbackURL(ctx context.Context, path string, host string, port int) *url.URL {
 	var u url.URL
 	u.Scheme = "http"
-	if tls := p.TLS(ctx, PublicInterface); tls.Enabled() || !p.IsDevelopmentMode(ctx) {
+	if tls := p.TLS(ctx, PublicInterface); tls.Enabled() {
 		u.Scheme = "https"
 	}
 	if host == "" {
