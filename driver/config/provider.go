@@ -422,13 +422,9 @@ func (p *DefaultProvider) PublicURL(ctx context.Context) *url.URL {
 }
 
 func (p *DefaultProvider) AdminURL(ctx context.Context) *url.URL {
-	host := p.host(AdminInterface)
-	if host == "" {
-		host = fmt.Sprintf("%s:%d", "localhost", p.port(AdminInterface))
-	}
 	return urlRoot(
 		p.getProvider(ctx).RequestURIF(
-			KeyAdminURL, &url.URL{Scheme: "http", Host: host, Path: "/"},
+			KeyAdminURL, &url.URL{Scheme: "http", Host: "localhost", Path: "/"},
 		),
 	)
 }
