@@ -387,7 +387,7 @@ func (p *DefaultProvider) publicFallbackURL(ctx context.Context, path string) *u
 func (p *DefaultProvider) fallbackURL(ctx context.Context, path string, host string, port int) *url.URL {
 	var u url.URL
 	u.Scheme = "http"
-	if tls := p.TLS(ctx, PublicInterface); tls.Enabled() {
+	if tls := p.TLS(ctx, PublicInterface); tls.Enabled() || !p.IsDevelopmentMode(ctx) {
 		u.Scheme = "https"
 	}
 	if host == "" {
@@ -422,9 +422,13 @@ func (p *DefaultProvider) PublicURL(ctx context.Context) *url.URL {
 }
 
 func (p *DefaultProvider) AdminURL(ctx context.Context) *url.URL {
+	host := p.host(AdminInterface)
+	if host != "" {
+		host = fmt.Sprintf("%s:%d", "localhost", p.port(AdminInterface))
+	}
 	return urlRoot(
 		p.getProvider(ctx).RequestURIF(
-			KeyAdminURL, p.fallbackURL(ctx, "/", p.host(AdminInterface), p.port(AdminInterface)),
+			KeyAdminURL, &url.URL{Scheme: "http", Host: host, Path: "/"},
 		),
 	)
 }
