@@ -1,0 +1,48 @@
+serve:
+  cookies:
+    same_site_mode: Lax
+  public:
+    host: 127.0.0.1
+    port: 4444
+    cors:
+        enabled: false
+        allowed_origins:
+           - https://mezon.ai
+           - https://*.mezon.ai
+        allowed_methods:
+           - POST
+           - GET
+           - PUT
+           - PATCH
+           - DELETE
+        allowed_headers:
+           - Authorization
+           - Content-Type
+        exposed_headers:
+           - Content-Type
+        allow_credentials: true
+        max_age: 10
+        debug: true
+    request_log:
+        disable_for_health: false
+urls:
+  self:
+    issuer: http://127.0.0.1:4444
+  consent: http://127.0.0.1:3000/authentication/consent
+  login: http://127.0.0.1:3000/authentication/login
+  logout: http://127.0.0.1:3000/authentication/logout
+  post_logout_redirect: https://mezon.ai
+
+secrets:
+  system:
+    - youReallyNeedToChangeThis
+
+oidc:
+  subject_identifiers:
+    supported_types:
+      - pairwise
+      - public
+    pairwise:
+      salt: youReallyNeedToChangeThis
+dsn: postgres://mezon:m3z0n@172.16.100.198:5432/hydra?sslmode=disable&max_conns=20&max_idle_conns=4
+
