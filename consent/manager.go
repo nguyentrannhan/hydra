@@ -30,7 +30,7 @@ type (
 		HandleConsentRequest(ctx context.Context, f *flow.Flow, r *flow.AcceptOAuth2ConsentRequest) (*flow.OAuth2ConsentRequest, error)
 		RevokeSubjectConsentSession(ctx context.Context, user string) error
 		RevokeSubjectClientConsentSession(ctx context.Context, user, client string) error
-		RevokeConsentSessionByID(ctx context.Context, consentChallengeID string) error
+		RevokeConsentSessionByID(ctx context.Context, consentRequestID string) error
 
 		VerifyAndInvalidateConsentRequest(ctx context.Context, verifier string) (*flow.AcceptOAuth2ConsentRequest, error)
 		FindGrantedAndRememberedConsentRequests(ctx context.Context, client, user string) ([]flow.AcceptOAuth2ConsentRequest, error)
@@ -46,6 +46,7 @@ type (
 		ConfirmLoginSession(ctx context.Context, loginSession *flow.LoginSession) error
 
 		CreateLoginRequest(ctx context.Context, req *flow.LoginRequest) (*flow.Flow, error)
+		CreateLoginRequestFromDeviceRequest(ctx context.Context, f *flow.Flow, req *flow.LoginRequest) (*flow.Flow, error)
 		GetLoginRequest(ctx context.Context, challenge string) (*flow.LoginRequest, error)
 		HandleLoginRequest(ctx context.Context, f *flow.Flow, challenge string, r *flow.HandledLoginRequest) (*flow.LoginRequest, error)
 		VerifyAndInvalidateLoginRequest(ctx context.Context, verifier string) (*flow.HandledLoginRequest, error)
@@ -61,6 +62,11 @@ type (
 		AcceptLogoutRequest(ctx context.Context, challenge string) (*flow.LogoutRequest, error)
 		RejectLogoutRequest(ctx context.Context, challenge string) error
 		VerifyAndInvalidateLogoutRequest(ctx context.Context, verifier string) (*flow.LogoutRequest, error)
+
+		CreateDeviceUserAuthRequest(ctx context.Context, req *flow.DeviceUserAuthRequest) (*flow.Flow, error)
+		GetDeviceUserAuthRequest(ctx context.Context, challenge string) (*flow.DeviceUserAuthRequest, error)
+		HandleDeviceUserAuthRequest(ctx context.Context, f *flow.Flow, challenge string, r *flow.HandledDeviceUserAuthRequest) (*flow.DeviceUserAuthRequest, error)
+		VerifyAndInvalidateDeviceUserAuthRequest(ctx context.Context, verifier string) (*flow.HandledDeviceUserAuthRequest, error)
 	}
 
 	ManagerProvider interface {

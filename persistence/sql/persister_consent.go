@@ -44,12 +44,12 @@ func (p *Persister) RevokeSubjectClientConsentSession(ctx context.Context, user,
 	return p.Transaction(ctx, p.revokeConsentSession("consent_challenge_id IS NOT NULL AND subject = ? AND client_id = ?", user, client))
 }
 
-func (p *Persister) RevokeConsentSessionByID(ctx context.Context, consentChallengeID string) (err error) {
+func (p *Persister) RevokeConsentSessionByID(ctx context.Context, consentRequestID string) (err error) {
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.RevokeConsentSessionByID",
-		trace.WithAttributes(attribute.String("consent_challenge_id", consentChallengeID)))
+		trace.WithAttributes(attribute.String("consent_challenge_id", consentRequestID)))
 	defer otelx.End(span, &err)
 
-	return p.Transaction(ctx, p.revokeConsentSession("consent_challenge_id = ?", consentChallengeID))
+	return p.Transaction(ctx, p.revokeConsentSession("consent_challenge_id = ?", consentRequestID))
 }
 
 func (p *Persister) revokeConsentSession(whereStmt string, whereArgs ...interface{}) func(context.Context, *pop.Connection) error {
@@ -67,7 +67,7 @@ func (p *Persister) revokeConsentSession(whereStmt string, whereArgs ...interfac
 		ids := make([]interface{}, 0, len(fs))
 		nid := p.NetworkID(ctx)
 		for _, f := range fs {
-			ids = append(ids, f.ConsentChallengeID.String())
+			ids = append(ids, f.ConsentRequestID.String())
 		}
 
 		if len(ids) == 0 {
@@ -183,7 +183,7 @@ func (p *Persister) CreateConsentRequest(ctx context.Context, f *flow.Flow, req 
 		return errorsx.WithStack(x.ErrNotFound)
 	}
 	f.State = flow.FlowStateConsentInitialized
-	f.ConsentChallengeID = sqlxx.NullString(req.ID)
+	f.ConsentRequestID = sqlxx.NullString(req.ConsentRequestID)
 	f.ConsentSkip = req.Skip
 	f.ConsentVerifier = sqlxx.NullString(req.Verifier)
 	f.ConsentCSRF = sqlxx.NullString(req.CSRF)
@@ -195,7 +195,6 @@ func (p *Persister) GetFlowByConsentChallenge(ctx context.Context, challenge str
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.GetFlowByConsentChallenge")
 	defer otelx.End(span, &err)
 
-	// challenge contains the flow.
 	f, err := flowctx.Decode[flow.Flow](ctx, p.r.FlowCipher(), challenge, flowctx.AsConsentChallenge)
 	if err != nil {
 		return nil, errorsx.WithStack(x.ErrNotFound)
@@ -222,7 +221,102 @@ func (p *Persister) GetConsentRequest(ctx context.Context, challenge string) (_ 
 		return nil, err
 	}
 
-	return f.GetConsentRequest(), nil
+	return f.GetConsentRequest(challenge), nil
+}
+
+// CreateDeviceUserAuthRequest creates a new flow from a DeviceUserAuthRequest.
+func (p *Persister) CreateDeviceUserAuthRequest(ctx context.Context, req *flow.DeviceUserAuthRequest) (_ *flow.Flow, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.CreateDeviceUserAuthRequest")
+	defer otelx.End(span, &err)
+
+	nid := p.NetworkID(ctx)
+	f := flow.NewDeviceFlow(req)
+	f.NID = nid
+
+	return f, nil
+}
+
+// GetDeviceUserAuthRequest decodes a challenge into a new DeviceUserAuthRequest.
+func (p *Persister) GetDeviceUserAuthRequest(ctx context.Context, challenge string) (_ *flow.DeviceUserAuthRequest, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.GetDeviceUserAuthRequest")
+	defer otelx.End(span, &err)
+
+	f, err := flowctx.Decode[flow.Flow](ctx, p.r.FlowCipher(), challenge, flowctx.AsDeviceChallenge)
+	if err != nil {
+		return nil, errorsx.WithStack(x.ErrNotFound.WithWrap(err))
+	}
+	if f.NID != p.NetworkID(ctx) {
+		return nil, errorsx.WithStack(x.ErrNotFound)
+	}
+	if f.RequestedAt.Add(p.config.ConsentRequestMaxAge(ctx)).Before(time.Now()) {
+		return nil, errorsx.WithStack(fosite.ErrRequestUnauthorized.WithHint("The device request has expired, please try again."))
+	}
+
+	return f.GetDeviceUserAuthRequest(), nil
+}
+
+// HandleDeviceUserAuthRequest uses a HandledDeviceUserAuthRequest to update the flow and returns a DeviceUserAuthRequest.
+func (p *Persister) HandleDeviceUserAuthRequest(ctx context.Context, f *flow.Flow, challenge string, r *flow.HandledDeviceUserAuthRequest) (_ *flow.DeviceUserAuthRequest, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.HandleDeviceUserAuthRequest")
+	defer otelx.End(span, &err)
+
+	if f == nil {
+		return nil, errorsx.WithStack(fosite.ErrInvalidRequest.WithDebug("Flow was nil"))
+	}
+	if f.NID != p.NetworkID(ctx) {
+		return nil, errorsx.WithStack(x.ErrNotFound)
+	}
+	err = f.HandleDeviceUserAuthRequest(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.GetDeviceUserAuthRequest(ctx, challenge)
+}
+
+// VerifyAndInvalidateDeviceUserAuthRequest verifies a verifier and invalidates the flow.
+func (p *Persister) VerifyAndInvalidateDeviceUserAuthRequest(ctx context.Context, verifier string) (_ *flow.HandledDeviceUserAuthRequest, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.VerifyAndInvalidateDeviceUserAuthRequest")
+	defer otelx.End(span, &err)
+
+	f, err := flowctx.Decode[flow.Flow](ctx, p.r.FlowCipher(), verifier, flowctx.AsDeviceVerifier)
+	if err != nil {
+		return nil, errorsx.WithStack(fosite.ErrAccessDenied.WithHint("The device verifier has already been used, has not been granted, or is invalid."))
+	}
+	if f.NID != p.NetworkID(ctx) {
+		return nil, errorsx.WithStack(sqlcon.ErrNoRows)
+	}
+
+	if err = f.InvalidateDeviceRequest(); err != nil {
+		return nil, errorsx.WithStack(fosite.ErrInvalidRequest.WithDebug(err.Error()))
+	}
+
+	return f.GetHandledDeviceUserAuthRequest(), nil
+}
+
+func (p *Persister) CreateLoginRequestFromDeviceRequest(ctx context.Context, f *flow.Flow, req *flow.LoginRequest) (_ *flow.Flow, err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.CreateLoginRequestFromDeviceRequest")
+	defer otelx.End(span, &err)
+
+	f.ID = req.ID
+	f.LoginSkip = req.Skip
+	f.Subject = req.Subject
+	f.SessionID = req.SessionID
+	f.LoginWasUsed = req.WasHandled
+	f.ForceSubjectIdentifier = req.ForceSubjectIdentifier
+	f.LoginVerifier = req.Verifier
+	f.LoginCSRF = req.CSRF
+	f.LoginAuthenticatedAt = req.AuthenticatedAt
+	f.RequestedAt = req.RequestedAt
+	f.State = flow.FlowStateLoginInitialized
+
+	nid := p.NetworkID(ctx)
+	if nid == uuid.Nil {
+		return nil, errorsx.WithStack(x.ErrNotFound)
+	}
+	f.NID = nid
+
+	return f, nil
 }
 
 func (p *Persister) CreateLoginRequest(ctx context.Context, req *flow.LoginRequest) (_ *flow.Flow, err error) {
@@ -230,6 +324,7 @@ func (p *Persister) CreateLoginRequest(ctx context.Context, req *flow.LoginReque
 	defer otelx.End(span, &err)
 
 	f := flow.NewFlow(req)
+
 	nid := p.NetworkID(ctx)
 	if nid == uuid.Nil {
 		return nil, errorsx.WithStack(x.ErrNotFound)
@@ -285,14 +380,11 @@ func (p *Persister) HandleConsentRequest(ctx context.Context, f *flow.Flow, r *f
 	if f.NID != p.NetworkID(ctx) {
 		return nil, errorsx.WithStack(x.ErrNotFound)
 	}
-	// Restore the short challenge ID, which was previously sent to the encoded flow,
-	// to make sure that the challenge ID in the returned flow matches the param.
-	r.ID = f.ConsentChallengeID.String()
 	if err := f.HandleConsentRequest(r); err != nil {
 		return nil, errorsx.WithStack(err)
 	}
 
-	return f.GetConsentRequest(), nil
+	return f.GetConsentRequest( /* No longer available and no longer needed: challenge =  */ ""), nil
 }
 
 func (p *Persister) VerifyAndInvalidateConsentRequest(ctx context.Context, verifier string) (_ *flow.AcceptOAuth2ConsentRequest, err error) {

@@ -9,27 +9,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ory/hydra/v2/internal/testhelpers"
-
-	"github.com/ory/x/assertx"
-
-	"github.com/ory/x/ioutilx"
-
-	"github.com/ory/x/uuidx"
-
 	"github.com/mohae/deepcopy"
-
-	"github.com/ory/hydra/v2/x"
-	"github.com/ory/x/contextx"
-	"github.com/ory/x/pointerx"
-
-	"github.com/ory/hydra/v2/driver/config"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	hydra "github.com/ory/hydra-client-go/v2"
 	"github.com/ory/hydra/v2/client"
+	"github.com/ory/hydra/v2/driver/config"
+	"github.com/ory/hydra/v2/internal/testhelpers"
+	"github.com/ory/hydra/v2/x"
+	"github.com/ory/x/assertx"
+	"github.com/ory/x/contextx"
+	"github.com/ory/x/ioutilx"
+	"github.com/ory/x/pointerx"
+	"github.com/ory/x/uuidx"
 )
 
 func createTestClient(prefix string) hydra.OAuth2Client {
@@ -43,7 +36,7 @@ func createTestClient(prefix string) hydra.OAuth2Client {
 		Owner:                     pointerx.Ptr(prefix + "an-owner"),
 		PolicyUri:                 pointerx.Ptr(prefix + "policy-uri"),
 		Scope:                     pointerx.Ptr(prefix + "foo bar baz"),
-		TosUri:                    pointerx.Ptr(prefix + "tos-uri"),
+		TosUri:                    pointerx.Ptr("https://example.org/" + prefix + "tos"),
 		ResponseTypes:             []string{prefix + "id_token", prefix + "code"},
 		RedirectUris:              []string{"https://" + prefix + "redirect-url", "https://" + prefix + "redirect-uri"},
 		ClientSecretExpiresAt:     pointerx.Ptr[int64](0),
@@ -54,7 +47,7 @@ func createTestClient(prefix string) hydra.OAuth2Client {
 		// because these values are not nullable in the SQL schema, we have to set them not nil
 		AllowedCorsOrigins: []string{},
 		Audience:           []string{},
-		Jwks:               map[string]interface{}{},
+		Jwks:               &hydra.JsonWebKeySet{},
 		SkipConsent:        pointerx.Ptr(false),
 	}
 }
@@ -95,12 +88,15 @@ func TestClientSDK(t *testing.T) {
 		// 		createClient.SecretExpiresAt = 10
 
 		// returned client is correct on Create
-		result, _, err := c.OAuth2API.CreateOAuth2Client(ctx).OAuth2Client(createClient).Execute()
-		require.NoError(t, err)
+		result, res, err := c.OAuth2API.CreateOAuth2Client(ctx).OAuth2Client(createClient).Execute()
+		if !assert.NoError(t, err) {
+			t.Fatalf("error: %s", ioutilx.MustReadAll(res.Body))
+		}
 		assert.NotEmpty(t, result.UpdatedAt)
 		assert.NotEmpty(t, result.CreatedAt)
 		assert.NotEmpty(t, result.RegistrationAccessToken)
 		assert.NotEmpty(t, result.RegistrationClientUri)
+		assert.NotEmpty(t, *result.TosUri)
 		assert.NotEmpty(t, result.ClientId)
 		createClient.ClientId = result.ClientId
 
@@ -229,5 +225,21 @@ func TestClientSDK(t *testing.T) {
 
 		// secret hashes shouldn't change between these PUT calls
 		require.Equal(t, result1.ClientSecret, result2.ClientSecret)
+	})
+
+	t.Run("case=patch client that has JSONWebKeysURI", func(t *testing.T) {
+		op := "replace"
+		path := "/client_name"
+		value := "test"
+
+		client := createTestClient("")
+		client.SetJwksUri("https://example.org/.well-known/jwks.json")
+		created, _, err := c.OAuth2API.CreateOAuth2Client(context.Background()).OAuth2Client(client).Execute()
+		require.NoError(t, err)
+		client.ClientId = created.ClientId
+
+		result, _, err := c.OAuth2API.PatchOAuth2Client(context.Background(), *client.ClientId).JsonPatch([]hydra.JsonPatch{{Op: op, Path: path, Value: value}}).Execute()
+		require.NoError(t, err)
+		require.Equal(t, value, pointerx.Deref(result.ClientName))
 	})
 }

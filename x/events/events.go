@@ -20,6 +20,8 @@ const (
 	// LoginRejected will be emitted when the login UI rejects a login request.
 	LoginRejected semconv.Event = "OAuth2LoginRejected"
 
+	DeviceUserCodeAccepted semconv.Event = "OAuth2DeviceUserCodeAccepted"
+
 	// ConsentAccepted will be emitted when the consent UI accepts a consent request.
 	ConsentAccepted semconv.Event = "OAuth2ConsentAccepted"
 
@@ -107,6 +109,11 @@ func WithClientName(clientID string) trace.EventOption {
 // WithSubject emits the subject as part of the event.
 func WithSubject(subject string) trace.EventOption {
 	return trace.WithAttributes(otelattr.String(attributeKeyOAuth2Subject, subject))
+}
+
+// WithSubject emits the consent request ID as part of the event.
+func WithConsentRequestID(id string) trace.EventOption {
+	return trace.WithAttributes(ConsentRequestID(id))
 }
 
 // WithRequest emits the subject and client ID from the fosite request as part of the event.

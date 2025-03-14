@@ -4,11 +4,13 @@
 package consent
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"time"
 
+	"github.com/ory/hydra/v2/client"
 	"github.com/ory/hydra/v2/flow"
 	"github.com/ory/hydra/v2/oauth2/flowctx"
 	"github.com/ory/hydra/v2/x/events"
@@ -35,6 +37,7 @@ type Handler struct {
 
 const (
 	LoginPath    = "/oauth2/auth/requests/login"
+	DevicePath   = "/oauth2/auth/requests/device"
 	ConsentPath  = "/oauth2/auth/requests/consent"
 	LogoutPath   = "/oauth2/auth/requests/logout"
 	SessionsPath = "/oauth2/auth/sessions"
@@ -66,6 +69,8 @@ func (h *Handler) SetRoutes(admin *httprouterx.RouterAdmin) {
 	admin.GET(LogoutPath, h.getOAuth2LogoutRequest)
 	admin.PUT(LogoutPath+"/accept", h.acceptOAuth2LogoutRequest)
 	admin.PUT(LogoutPath+"/reject", h.rejectOAuth2LogoutRequest)
+
+	admin.PUT(DevicePath+"/accept", h.acceptUserCodeRequest)
 }
 
 // Revoke OAuth 2.0 Consent Session Parameters
@@ -88,12 +93,12 @@ type revokeOAuth2ConsentSessions struct {
 	// in: query
 	Client string `json:"client"`
 
-	// Consent Challenge ID
+	// Consent Request ID
 	//
 	// If set, revoke all token chains derived from this particular consent request ID.
 	//
 	// in: query
-	ConsentChallengeID string `json:"consent_challenge_id"`
+	ConsentRequestID string `json:"consent_request_id"`
 
 	// Revoke All Consent Sessions
 	//
@@ -122,44 +127,37 @@ type revokeOAuth2ConsentSessions struct {
 //	  204: emptyResponse
 //	  default: errorOAuth2
 func (h *Handler) revokeOAuth2ConsentSessions(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	subject := r.URL.Query().Get("subject")
-	client := r.URL.Query().Get("client")
-	consentChallengeID := r.URL.Query().Get("consent_challenge_id")
-	allClients := r.URL.Query().Get("all") == "true"
-	if subject == "" && consentChallengeID == "" {
-		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(`Query parameter 'subject' or 'consent_challenge_id' are required.`)))
-		return
-	}
-	if consentChallengeID != "" && subject != "" {
-		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(`Query parameter 'subject' and 'consent_challenge_id' cannot be set at the same time.`)))
-		return
-	}
-	if consentChallengeID != "" && client != "" {
-		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(`Query parameter 'client' and 'consent_challenge_id' cannot be set at the same time.`)))
-		return
-	}
+	var (
+		subject          = r.URL.Query().Get("subject")
+		client           = r.URL.Query().Get("client")
+		consentRequestID = r.URL.Query().Get("consent_request_id")
+		allClients       = r.URL.Query().Get("all") == "true"
+	)
 
 	switch {
-	case client != "":
+	case consentRequestID != "" && subject == "" && client == "":
+		if err := h.r.ConsentManager().RevokeConsentSessionByID(r.Context(), consentRequestID); err != nil && !errors.Is(err, x.ErrNotFound) {
+			h.r.Writer().WriteError(w, r, err)
+			return
+		}
+		events.Trace(r.Context(), events.ConsentRevoked, events.WithConsentRequestID(consentRequestID))
+
+	case consentRequestID == "" && subject != "" && client != "" && !allClients:
 		if err := h.r.ConsentManager().RevokeSubjectClientConsentSession(r.Context(), subject, client); err != nil && !errors.Is(err, x.ErrNotFound) {
 			h.r.Writer().WriteError(w, r, err)
 			return
 		}
 		events.Trace(r.Context(), events.ConsentRevoked, events.WithSubject(subject), events.WithClientID(client))
-	case allClients:
+
+	case consentRequestID == "" && subject != "" && client == "" && allClients:
 		if err := h.r.ConsentManager().RevokeSubjectConsentSession(r.Context(), subject); err != nil && !errors.Is(err, x.ErrNotFound) {
 			h.r.Writer().WriteError(w, r, err)
 			return
 		}
 		events.Trace(r.Context(), events.ConsentRevoked, events.WithSubject(subject))
-	case consentChallengeID != "":
-		if err := h.r.ConsentManager().RevokeConsentSessionByID(r.Context(), consentChallengeID); err != nil && !errors.Is(err, x.ErrNotFound) {
-			h.r.Writer().WriteError(w, r, err)
-			return
-		}
-		return
+
 	default:
-		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(`Query parameter both 'client' and 'all' is not defined but one of them should have been.`)))
+		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint("Invalid combination of query parameters.")))
 		return
 	}
 
@@ -782,7 +780,7 @@ func (h *Handler) acceptOAuth2ConsentRequest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	p.ID = challenge
+	p.ConsentRequestID = cr.ConsentRequestID
 	p.RequestedAt = cr.RequestedAt
 	p.HandledAt = sqlxx.NullTime(time.Now().UTC())
 
@@ -899,12 +897,13 @@ func (h *Handler) rejectOAuth2ConsentRequest(w http.ResponseWriter, r *http.Requ
 		h.r.Writer().WriteError(w, r, err)
 		return
 	}
+	cr := f.GetConsentRequest(challenge)
 
 	request, err := h.r.ConsentManager().HandleConsentRequest(ctx, f, &flow.AcceptOAuth2ConsentRequest{
-		Error:       &p,
-		ID:          challenge,
-		RequestedAt: hr.RequestedAt,
-		HandledAt:   sqlxx.NullTime(time.Now().UTC()),
+		Error:            &p,
+		ConsentRequestID: cr.ConsentRequestID,
+		RequestedAt:      hr.RequestedAt,
+		HandledAt:        sqlxx.NullTime(time.Now().UTC()),
 	})
 	if err != nil {
 		h.r.Writer().WriteError(w, r, errorsx.WithStack(err))
@@ -1069,4 +1068,142 @@ func (h *Handler) getOAuth2LogoutRequest(w http.ResponseWriter, r *http.Request,
 	}
 
 	h.r.Writer().Write(w, r, request)
+}
+
+// Verify OAuth 2.0 User Code Request
+//
+// swagger:parameters acceptUserCodeRequest
+type verifyUserCodeRequest struct {
+	// in: query
+	// required: true
+	Challenge string `json:"device_challenge"`
+
+	// in: body
+	Body flow.AcceptDeviceUserCodeRequest
+}
+
+// swagger:route PUT /admin/oauth2/auth/requests/device/accept oAuth2 acceptUserCodeRequest
+//
+// # Accepts a device grant user_code request
+//
+// Accepts a device grant user_code request
+//
+//	Consumes:
+//	- application/json
+//
+//	Produces:
+//	- application/json
+//
+//	Schemes: http, https
+//
+//	Responses:
+//	  200: oAuth2RedirectTo
+//	  default: errorOAuth2
+func (h *Handler) acceptUserCodeRequest(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
+	challenge := r.URL.Query().Get("device_challenge")
+	if challenge == "" {
+		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint(`Query parameter 'device_challenge' is not defined but should have been.`)))
+		return
+	}
+
+	var reqBody flow.AcceptDeviceUserCodeRequest
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&reqBody); err != nil {
+		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithWrap(err).WithHintf("Unable to decode request body: %s", err.Error())))
+		return
+	}
+
+	if reqBody.UserCode == "" {
+		h.r.Writer().WriteError(w, r, errorsx.WithStack(fosite.ErrInvalidRequest.WithHint("Field 'user_code' must not be empty.")))
+		return
+	}
+
+	cr, err := h.r.ConsentManager().GetDeviceUserAuthRequest(ctx, challenge)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	f, err := h.decodeFlowWithClient(ctx, challenge, flowctx.AsDeviceChallenge)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	userCodeSignature, err := h.r.RFC8628HMACStrategy().UserCodeSignature(r.Context(), reqBody.UserCode)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, fosite.ErrServerError.WithWrap(err).WithHint(`The 'user_code' signature could not be computed.`))
+		return
+	}
+
+	userCodeRequest, err := h.r.OAuth2Storage().GetUserCodeSession(r.Context(), userCodeSignature, nil)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, fosite.ErrInvalidRequest.WithWrap(err).WithHint(`The 'user_code' session could not be found or has expired or is otherwise malformed.`))
+		return
+	}
+
+	if err := h.r.RFC8628HMACStrategy().ValidateUserCode(ctx, userCodeRequest, reqBody.UserCode); err != nil {
+		h.r.Writer().WriteError(w, r, fosite.ErrInvalidRequest.WithWrap(err).WithHint(`The 'user_code' session could not be found or has expired or is otherwise malformed.`))
+		return
+	}
+
+	p := flow.HandledDeviceUserAuthRequest{
+		ID:                  f.DeviceChallengeID.String(),
+		RequestedAt:         cr.RequestedAt,
+		HandledAt:           sqlxx.NullTime(time.Now().UTC()),
+		Client:              userCodeRequest.GetClient().(*client.Client),
+		DeviceCodeRequestID: userCodeRequest.GetID(),
+		RequestedScope:      []string(userCodeRequest.GetRequestedScopes()),
+		RequestedAudience:   []string(userCodeRequest.GetRequestedAudience()),
+	}
+
+	// Append the client_id to the original RequestURL, as it is needed for the login flow
+	reqURL, err := url.Parse(f.RequestURL)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, errorsx.WithStack(err))
+		return
+	}
+
+	if reqURL.Query().Get("client_id") == "" {
+		q := reqURL.Query()
+		q.Add("client_id", userCodeRequest.GetClient().GetID())
+		reqURL.RawQuery = q.Encode()
+	}
+
+	f.RequestURL = reqURL.String()
+	hr, err := h.r.ConsentManager().HandleDeviceUserAuthRequest(ctx, f, challenge, &p)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	ru, err := url.Parse(hr.RequestURL)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, fosite.ErrInvalidRequest.WithWrap(err).WithHint(`Unable to parse the request_url.`))
+		return
+	}
+
+	verifier, err := f.ToDeviceVerifier(ctx, h.r)
+	if err != nil {
+		h.r.Writer().WriteError(w, r, err)
+		return
+	}
+
+	events.Trace(ctx, events.DeviceUserCodeAccepted, events.WithClientID(userCodeRequest.GetClient().GetID()))
+
+	h.r.Writer().Write(w, r, &flow.OAuth2RedirectTo{
+		RedirectTo: urlx.SetQuery(ru, url.Values{"device_verifier": {verifier}, "client_id": {userCodeRequest.GetClient().GetID()}}).String(),
+	})
+}
+
+func (h *Handler) decodeFlowWithClient(ctx context.Context, challenge string, opts ...flowctx.CodecOption) (*flow.Flow, error) {
+	f, err := flowctx.Decode[flow.Flow](ctx, h.r.FlowCipher(), challenge, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
 }

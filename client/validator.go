@@ -54,7 +54,7 @@ func (v *Validator) Validate(ctx context.Context, c *Client) error {
 	if c.TokenEndpointAuthMethod == "" {
 		c.TokenEndpointAuthMethod = "client_secret_basic"
 	} else if c.TokenEndpointAuthMethod == "private_key_jwt" {
-		if len(c.JSONWebKeysURI) == 0 && c.JSONWebKeys == nil {
+		if len(c.JSONWebKeysURI) == 0 && c.GetJSONWebKeys() == nil {
 			return errorsx.WithStack(ErrInvalidClientMetadata.WithHint("When token_endpoint_auth_method is 'private_key_jwt', either jwks or jwks_uri must be set."))
 		}
 		if c.TokenEndpointAuthSigningAlgorithm != "" && !isSupportedAuthTokenSigningAlg(c.TokenEndpointAuthSigningAlgorithm) {
@@ -62,12 +62,12 @@ func (v *Validator) Validate(ctx context.Context, c *Client) error {
 		}
 	}
 
-	if len(c.JSONWebKeysURI) > 0 && c.JSONWebKeys != nil {
+	if len(c.JSONWebKeysURI) > 0 && c.GetJSONWebKeys() != nil {
 		return errorsx.WithStack(ErrInvalidClientMetadata.WithHint("Fields jwks and jwks_uri can not both be set, you must choose one."))
 	}
 
-	if c.JSONWebKeys != nil && c.JSONWebKeys.JSONWebKeySet != nil {
-		for _, k := range c.JSONWebKeys.Keys {
+	if jsonWebKeys := c.GetJSONWebKeys(); jsonWebKeys != nil {
+		for _, k := range jsonWebKeys.Keys {
 			if !k.Valid() {
 				return errorsx.WithStack(ErrInvalidClientMetadata.WithHint("Invalid JSON web key in set."))
 			}
@@ -87,6 +87,18 @@ func (v *Validator) Validate(ctx context.Context, c *Client) error {
 		if err := ipx.AreAllAssociatedIPsAllowed(values); err != nil {
 			return errorsx.WithStack(ErrInvalidClientMetadata.WithHintf("Client IP address is not allowed: %s", err))
 		}
+	}
+
+	if c.TermsOfServiceURI != "" {
+		u, err := url.ParseRequestURI(c.TermsOfServiceURI)
+		if err != nil {
+			return errorsx.WithStack(ErrInvalidClientMetadata.WithHint("Field tos_uri must be a valid URI."))
+		}
+
+		if u.Scheme != "https" && u.Scheme != "http" {
+			return errorsx.WithStack(ErrInvalidClientMetadata.WithHintf("tos_uri %s must use https:// or http:// as HTTP scheme.", c.TermsOfServiceURI))
+		}
+
 	}
 
 	if len(c.Secret) > 0 && len(c.Secret) < 6 {
